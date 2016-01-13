@@ -2,32 +2,37 @@ import logging
 
 import piazza_api
 
-class Moderator:
+class Moderator(object):
     cls_id = None
+    suggestions = []
 
     def __init__(self, cls_id=None, email=None):
         if cls_id is None:
             cls_id = self.cls_id
         self._piazza = self.authenticate(email)
         self._network = self._piazza.network(cls_id)
-        self._info = None
-
-    def authenticate(self, email):
-        """Create a Piazza API object and prompts the user to log in."""
-        p = piazza_api.Piazza()
-        if email is None:
-            email = input('Email: ') # piazza_api uses raw_input if email is None
-        p.user_login(email)
-        return p
+        self._info = self._piazza.get_user_profile()
 
     @property
     def info(self):
         """Return account information."""
-        if self._info is None:
-            self._info = self._piazza.get_user_profile()
         return self._info
 
-    def unread_posts(self):
+    def authenticate(self, email):
+        """Create a Piazza API object and prompts the user to log in."""
+        piazza = piazza_api.Piazza()
+        if email is None:
+            # piazza_api uses raw_input if email is None,
+            # which isn't Python 3 compatible
+            email = input('Email: ')
+        piazza.user_login(email)
+        return piazza
+
+    def add_suggestions(self, suggestions):
+        """Register more suggestions with the moderator."""
+        self.suggestions = self.suggestions + suggestions
+
+    def get_unread_posts(self):
         """Retrieve unread posts from the class."""
         unread = self._network.feed_filters.unread()
         filtered = self._network.get_filtered_feed(unread)['feed']
@@ -36,14 +41,14 @@ class Moderator:
 
     def run(self):
         """Read all unread posts and make suggestions."""
-        posts = self.unread_posts()
+        posts = self.get_unread_posts()
         for post in posts:
             logging.info('Post {}: can_suggest={}, suggested={}'
                          .format(post.id, post.can_suggest, post.suggested))
             if post.can_suggest and not post.suggested:
                 post.suggest()
 
-class Post:
+class Post(object):
     def __init__(self, post_id, moderator):
         self.id = post_id
         self._moderator = moderator
@@ -54,7 +59,7 @@ class Post:
         self.folders = []
         self.tags = []
         self.can_suggest = False  # suggest only if no instructor activity
-        self.suggested = False    # don't suggest if already made a suggestion
+        self.suggested = True     # don't suggest if already made a suggestion
         self._populate_fields()
 
     def _populate_fields(self):
@@ -68,12 +73,29 @@ class Post:
         self.folders = data['folders']
         self.tags = data['tags']
 
-        self.can_suggest = 'instructor-note' not in self.tags
-        if self.can_suggest:
-            edited_by = [change['uid'] for change in data['change_log']]
-            edited_users = self._network.get_users(edited_by)
-            self.can_suggest = not any(user['admin'] for user in edited_users)
+        self.can_suggest = not self.has_instructor_activity(data)
 
+    def has_instructor_activity(self, data):
+        """Returns whether there has been any instructor activity on the post.
+        The moderator will only make a suggestion if there has been no
+        instructor activity.
+
+        There are three forms of instructor activity:
+            1. An instructor created the post
+            2. An instructor edited the post
+            3. An instructor posted a followup on the post
+        """
+        # 1. An instructor created the post
+        if 'instructor-note' in self.tags:
+            return True
+
+        # 2. An instructor edited the post
+        edited_by = [change['uid'] for change in data['change_log']]
+        edited_users = self._network.get_users(edited_by)
+        if any(user['admin'] for user in edited_users):
+            return True
+
+        # 3. An instructor posted a followup on the post
         children = data['children']
         followups, i_answer, s_answer = [], None, None
         for child in children:
@@ -89,29 +111,34 @@ class Post:
 
         followup_children = sum([f['children'] for f in followups], [])
         followup_all = [f['uid'] for f in followups + followup_children]
-
-        my_id = self._moderator.info['user_id']
-        self.suggested = my_id in followup_all
-
         followup_users = self._network.get_users(followup_all) # random order
         uid_to_user = {u['id']: u for u in followup_users}
 
-        followup_starters = [uid_to_user[uid] for uid in followup_all[:len(followups)]]
-        followup_responders = [uid_to_user[uid] for uid in followup_all[len(followups):]]
+        followup_users = [uid_to_user[uid] for uid in followup_all]
+        followup_starters = followup_users[:len(followups)]
+        followup_responders = followup_users[len(followups):]
+        if any(user['admin'] for user in followup_users):
+            return True
 
-        self.can_suggest = self.can_suggest and not any(u['admin'] for u in followup_users)
+        # No instructor activity! Check if a suggestion has already been made.
+        my_id = self._moderator.info['user_id']
+        self.suggested = my_id in followup_starters
+        return False
 
-    def _analyze(self):
-        """Analyze the post by applying a set of rules."""
+    def analyze(self):
+        """Analyze the post by applying a set of suggestions."""
         logging.debug('Post {}'.format(self.id))
         logging.debug('Subject: {}'.format(self.subject))
         logging.debug('Content: {}'.format(self.content))
         logging.debug('Folders: {}'.format(self.folders))
         logging.debug('Tags: {}'.format(self.tags))
-        return None # TODO
+
+        for suggestion in self._moderator.suggestions:
+            if suggestion.applies(self):
+                return suggestion.apply(self)
 
     def suggest(self):
-        """Analyze the post to see if there are any suggestions to make."""
-        result = self._analyze()
-        if result:
+        """Analyze the post to see if any moderator suggestions apply."""
+        result = self.analyze()
+        if result is not None:
             self._network.create_followup(self.id, result)
