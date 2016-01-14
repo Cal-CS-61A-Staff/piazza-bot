@@ -1,0 +1,2 @@
+from piazza_moderator.suggestions.base_suggestion import Suggestion
+from piazza_moderator.suggestions.title_suggestion import TitleSuggestion

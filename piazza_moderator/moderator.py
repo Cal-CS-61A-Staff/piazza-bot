@@ -2,9 +2,12 @@ import logging
 
 import piazza_api
 
+from piazza_moderator.utils import reformat
+
 class Moderator(object):
     cls_id = None
     suggestions = []
+    body = '{}'
 
     def __init__(self, cls_id=None, email=None):
         if cls_id is None:
@@ -49,8 +52,8 @@ class Moderator(object):
                 post.suggest()
 
 class Post(object):
-    def __init__(self, post_id, moderator):
-        self.id = post_id
+    def __init__(self, post_num, moderator):
+        self.post_num = post_num
         self._moderator = moderator
         self._network = moderator._network
 
@@ -64,7 +67,10 @@ class Post(object):
 
     def _populate_fields(self):
         """Parse response data and set attributes."""
-        data = self._network.get_post(self.id)
+        data = self._network.get_post(self.post_num)
+        self._data = data
+
+        self.id = data['id']
 
         self.subject = data['history'][0]['subject']
         self.content = data['history'][0]['content']
@@ -126,19 +132,25 @@ class Post(object):
         return False
 
     def analyze(self):
-        """Analyze the post by applying a set of suggestions."""
-        logging.debug('Post {}'.format(self.id))
+        """Analyze the post by returning a set of suggestions."""
+        logging.debug('Post {}'.format(self.post_num))
         logging.debug('Subject: {}'.format(self.subject))
         logging.debug('Content: {}'.format(self.content))
         logging.debug('Folders: {}'.format(self.folders))
         logging.debug('Tags: {}'.format(self.tags))
 
-        for suggestion in self._moderator.suggestions:
-            if suggestion.applies(self):
-                return suggestion.apply(self)
+        return [
+            s.apply(self)
+            for s in self._moderator.suggestions if s.applies(self)
+        ]
 
     def suggest(self):
         """Analyze the post to see if any moderator suggestions apply."""
-        result = self.analyze()
-        if result is not None:
-            self._network.create_followup(self.id, result)
+        suggestions = self.analyze()
+        if suggestions:
+            suggestions = ['{}. {}'.format(i, suggestion)
+                           for i, suggestion in enumerate(suggestions, 1)]
+            formatted = self._moderator.body.format('\n'.join(suggestions))
+            result = reformat(formatted)
+            logging.debug(result)
+            self._network.create_followup({'id': self.id}, result)

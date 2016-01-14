@@ -5,9 +5,4 @@ piazza-moderator makes instructors' lives easier by:
   - identifying posts that may be duplicates
 """
 
-from piazza_moderator.moderator import Moderator
-
-class CS61A(Moderator):
-    cls_id = 'id52tzq2i7yfx'
-
 __version__ = '0.1.0'
